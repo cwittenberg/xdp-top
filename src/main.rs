@@ -14,9 +14,31 @@ use ratatui::{
 };
 use std::{
     io,
+    process::Command,
     time::{Duration, Instant},
 };
 use ui::{draw_ui, is_inside};
+
+/// Validates that required external Linux commands are available in the system PATH.
+fn check_os_dependencies() -> Result<(), String> {
+    let deps = ["ip", "ethtool", "lspci"];
+    let mut missing = Vec::new();
+
+    for cmd in deps {
+        match Command::new("which").arg(cmd).output() {
+            Ok(output) if output.status.success() => {}
+            _ => missing.push(cmd),
+        }
+    }
+
+    if !missing.is_empty() {
+        return Err(format!(
+            "Missing required OS utilities: {}.\nPlease install them via your package manager (e.g., 'apt install iproute2 ethtool pciutils').",
+            missing.join(", ")
+        ));
+    }
+    Ok(())
+}
 
 fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> Result<()> {
     let tick_rate = Duration::from_millis(500);
@@ -126,7 +148,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> Result<()> {
                         }
                     }
 
-                    // FIX: Execute actions ONLY on Mouse Release (Up) to prevent ANSI escape code leaks on quit.
+                    // Execute actions ONLY on Mouse Release (Up) to prevent ANSI escape code leaks on quit.
                     if mouse_event.kind == MouseEventKind::Up(MouseButton::Left) {
                         match app.mode {
                             AppMode::Normal => {
@@ -172,6 +194,13 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    // 1. Dependency Check First
+    if let Err(e) = check_os_dependencies() {
+        eprintln!("Startup Error:\n{}", e);
+        std::process::exit(1);
+    }
+
+    // 2. Setup Terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -182,15 +211,14 @@ fn main() -> Result<()> {
     let app = App::new();
     let res = run_app(&mut terminal, app);
 
-    // FIX: Standard teardown order to guarantee clean exits.
-    // By disabling Mouse Capture while STILL inside the Alternate Screen,
-    // the terminal does not leak raw escape codes into the final standard output.
+    // 3. Teardown (Mouse off -> Screen off -> Raw off)
+    // This strictly prevents the terminal from intercepting the mouse release event and 
+    // printing ANSI artifacts like "0;119;2m" into standard output on exit.
     let mut stdout = io::stdout();
-    execute!(stdout, DisableMouseCapture)?;
-    execute!(stdout, LeaveAlternateScreen)?;
-    disable_raw_mode()?;
-    
-    terminal.show_cursor()?;
+    let _ = execute!(stdout, DisableMouseCapture);
+    let _ = execute!(stdout, LeaveAlternateScreen);
+    let _ = disable_raw_mode();
+    let _ = terminal.show_cursor();
 
     if let Err(err) = res {
         eprintln!("Error running xdp-top: {:?}", err);

@@ -3,6 +3,9 @@ name = "xdp-top"
 version = "0.2.0"
 edition = "2021"
 description = "A terminal utility to visualize XDP utilization and efficiency"
+license = "MIT"
+repository = "https://github.com/cwittenberg/xdp-top"
+maintainer = "Christian Wittenberg <christianwittenberg@gmail.com>"
 
 [dependencies]
 crossterm = "0.27.0"

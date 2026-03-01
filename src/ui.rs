@@ -290,7 +290,7 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
         f.render_widget(tx_barchart, chunks[tx_chunk_idx]);
     }
 
-    // 6. Traffic Sparklines (Conditional, Index 5)
+    // 6. Traffic Sparklines (Conditional)
     if actually_show_throughput {
         let spark_chunks = Layout::default()
             .direction(Direction::Horizontal)
