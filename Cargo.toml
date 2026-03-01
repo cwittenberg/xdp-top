@@ -5,17 +5,10 @@ edition = "2021"
 description = "A terminal utility to visualize XDP utilization and efficiency"
 license = "MIT"
 repository = "https://github.com/cwittenberg/xdp-top"
-maintainer = "Christian Wittenberg <christianwittenberg@gmail.com>"
-
-[dependencies]
-crossterm = "0.27.0"
-ratatui = "0.26.1"
-sysinfo = "0.30.7"
-anyhow = "1.0.81"
-regex = "1.10.3"
+authors = ["Christian Wittenberg <christianwittenberg@gmail.com>"]
 
 [package.metadata.deb]
-maintainer = "Christian Wittenberg"
+maintainer = "Christian Wittenberg <christianwittenberg@gmail.com>"
 copyright = "2026, Christian Wittenberg"
 extended-description = "A throughput visualizer for eXpress Data Path (XDP) capable network cards."
 
@@ -23,3 +16,10 @@ extended-description = "A throughput visualizer for eXpress Data Path (XDP) capa
 assets = [
     { source = "target/release/xdp-top", dest = "/usr/bin/xdp-top", mode = "755" }
 ]
+
+[dependencies]
+crossterm = "0.27.0"
+ratatui = "0.26.1"
+sysinfo = "0.30.7"
+anyhow = "1.0.81"
+regex = "1.10.3"
