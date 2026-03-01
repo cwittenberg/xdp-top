@@ -353,7 +353,7 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
         
         let about_text = vec![
             Line::from(""),
-            Line::from(Span::styled("XDP-TOP v0.2.0", Style::default().add_modifier(Modifier::BOLD).fg(Color::Cyan))),
+            Line::from(Span::styled("XDP-TOP v0.2.3", Style::default().add_modifier(Modifier::BOLD).fg(Color::Cyan))),
             Line::from(""),
             Line::from("A throughput visualizer for eXpress Data Path (XDP)"),
             Line::from("capable network cards."),
