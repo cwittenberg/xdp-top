@@ -124,33 +124,35 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> Result<()> {
                         } else {
                             app.hovered_nic_idx = None;
                         }
+                    }
 
-                        if mouse_event.kind == MouseEventKind::Down(MouseButton::Left) {
-                            if let Some(idx) = app.hovered_nic_idx {
-                                app.select_nic(idx);
-                                app.mode = AppMode::Normal;
-                            } else if !is_inside(app.mouse_pos, app.list_rect) {
+                    // FIX: Execute actions ONLY on Mouse Release (Up) to prevent ANSI escape code leaks on quit.
+                    if mouse_event.kind == MouseEventKind::Up(MouseButton::Left) {
+                        match app.mode {
+                            AppMode::Normal => {
+                                app.focus = None; // Reset keyboard focus if using mouse
+                                if is_inside(app.mouse_pos, app.btn_quit_rect) {
+                                    app.quit = true;
+                                } else if is_inside(app.mouse_pos, app.btn_about_rect) {
+                                    app.mode = AppMode::About;
+                                } else if is_inside(app.mouse_pos, app.btn_toggle_rect) {
+                                    app.show_throughput = !app.show_throughput;
+                                } else if is_inside(app.mouse_pos, app.btn_nic_rect) {
+                                    app.mode = AppMode::NicMenu;
+                                    app.menu_state.select(Some(app.selected_idx));
+                                }
+                            }
+                            AppMode::NicMenu => {
+                                if let Some(idx) = app.hovered_nic_idx {
+                                    app.select_nic(idx);
+                                    app.mode = AppMode::Normal;
+                                } else if !is_inside(app.mouse_pos, app.list_rect) {
+                                    app.mode = AppMode::Normal;
+                                }
+                            }
+                            AppMode::About => {
                                 app.mode = AppMode::Normal;
                             }
-                        }
-                    } else if app.mode == AppMode::Normal {
-                        app.focus = None;
-                        
-                        if mouse_event.kind == MouseEventKind::Down(MouseButton::Left) {
-                            if is_inside(app.mouse_pos, app.btn_quit_rect) {
-                                app.quit = true;
-                            } else if is_inside(app.mouse_pos, app.btn_about_rect) {
-                                app.mode = AppMode::About;
-                            } else if is_inside(app.mouse_pos, app.btn_toggle_rect) {
-                                app.show_throughput = !app.show_throughput;
-                            } else if is_inside(app.mouse_pos, app.btn_nic_rect) {
-                                app.mode = AppMode::NicMenu;
-                                app.menu_state.select(Some(app.selected_idx));
-                            }
-                        }
-                    } else if app.mode == AppMode::About {
-                        if mouse_event.kind == MouseEventKind::Down(MouseButton::Left) {
-                            app.mode = AppMode::Normal;
                         }
                     }
                 }
@@ -173,20 +175,21 @@ fn main() -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let app = App::new();
     let res = run_app(&mut terminal, app);
 
-    // FIX: Disable mouse capture and leave alternate screen BEFORE disabling raw mode.
-    // This stops the terminal from echoing the mouse-release ANSI escape sequence to standard output.
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
+    // FIX: Standard teardown order to guarantee clean exits.
+    // By disabling Mouse Capture while STILL inside the Alternate Screen,
+    // the terminal does not leak raw escape codes into the final standard output.
+    let mut stdout = io::stdout();
+    execute!(stdout, DisableMouseCapture)?;
+    execute!(stdout, LeaveAlternateScreen)?;
     disable_raw_mode()?;
+    
     terminal.show_cursor()?;
 
     if let Err(err) = res {

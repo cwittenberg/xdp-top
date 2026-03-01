@@ -55,19 +55,27 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 }
 
 pub fn draw_ui(f: &mut Frame, app: &mut App) {
-    // Dynamically size the layout based on the throughput toggle
+    let term_height = f.size().height;
+
+    // FIX: 80x20 Screen Layout Adjustment
+    // We require at least 30 rows to comfortably fit the throughput sparklines alongside everything else.
+    let screen_allows_throughput = term_height >= 30;
+    let actually_show_throughput = app.show_throughput && screen_allows_throughput;
+
     let mut root_constraints = vec![
         Constraint::Length(3),  // 0: Header Row
         Constraint::Length(7),  // 1: Split NIC Info pane
-        Constraint::Length(4),  // 2: Efficiency
+        Constraint::Length(5),  // 2: Efficiency (Expanded to 5 lines for Traffic Profile)
     ];
 
-    if app.show_throughput {
-        root_constraints.push(Constraint::Length(10)); // 3: Sparklines
+    if actually_show_throughput {
+        root_constraints.push(Constraint::Fill(1)); // 3: RX BarChart
+        root_constraints.push(Constraint::Fill(1)); // 4: TX BarChart
+        root_constraints.push(Constraint::Length(8)); // 5: Sparklines at bottom
+    } else {
+        root_constraints.push(Constraint::Fill(1)); // 3: RX BarChart
+        root_constraints.push(Constraint::Fill(1)); // 4: TX BarChart
     }
-    
-    root_constraints.push(Constraint::Fill(1)); // RX BarChart
-    root_constraints.push(Constraint::Fill(1)); // TX BarChart
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -100,7 +108,6 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
     let title_block = Paragraph::new(header_text).block(Block::default().borders(Borders::ALL));
     f.render_widget(title_block, header_chunks[0]);
 
-    // Unified button styling
     let idle_btn_style = Style::default().fg(Color::Cyan);
     let focus_btn_style = Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD);
 
@@ -108,7 +115,13 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
     let nic_btn = Paragraph::new(" [ Select NIC ] ").alignment(Alignment::Center).block(Block::default().borders(Borders::ALL).style(if nic_focused { focus_btn_style } else { idle_btn_style }));
     f.render_widget(nic_btn, header_chunks[1]);
 
-    let toggle_txt = if app.show_throughput { " [ Hide Throughput ] " } else { " [ Show Throughput ] " };
+    let toggle_txt = if !actually_show_throughput && app.show_throughput {
+        " [ Hidden (Size) ] "
+    } else if app.show_throughput {
+        " [ Hide Throughput ] "
+    } else {
+        " [ Show Throughput ] "
+    };
     let toggle_focused = app.focus == Some(Focus::ToggleBtn) || is_inside(app.mouse_pos, app.btn_toggle_rect);
     let toggle_btn = Paragraph::new(toggle_txt).alignment(Alignment::Center).block(Block::default().borders(Borders::ALL).style(if toggle_focused { focus_btn_style } else { idle_btn_style }));
     f.render_widget(toggle_btn, header_chunks[2]);
@@ -128,7 +141,6 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
         .split(chunks[1]);
 
     if let Some(info) = &app.current_nic_info {
-        // Hardware Box
         let hw_text = vec![
             Line::from(vec![Span::styled("Hardware:  ", Style::default().fg(Color::DarkGray)), Span::styled(&info.hardware_model, Style::default().add_modifier(Modifier::BOLD))]),
             Line::from(vec![Span::styled("Driver:    ", Style::default().fg(Color::DarkGray)), Span::styled(&info.driver, Style::default().fg(Color::LightBlue)), Span::raw(format!(" (fw: {})", info.firmware))]),
@@ -137,7 +149,6 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
         let hw_block = Paragraph::new(hw_text).block(Block::default().borders(Borders::ALL).title(" Hardware Details "));
         f.render_widget(hw_block, info_chunks[0]);
 
-        // Channel / XDP Box
         let cap_color = if info.xdp_is_zerocopy { Color::Green } else { Color::Yellow };
         let state_color = if info.current_xdp_state.contains("NATIVE") { Color::Green }
                           else if info.current_xdp_state.contains("GENERIC") { Color::Red }
@@ -157,38 +168,134 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
         let xdp_block = Paragraph::new(xdp_text).block(Block::default().borders(Borders::ALL).title(" Logical Channels & XDP "));
         f.render_widget(xdp_block, info_chunks[1]);
 
-        // 3. Efficiency Assessment (Flow-Aware)
-        let total_pps = app.current_rx_pps + app.current_tx_pps;
-        let c_count = app.physical_cores;
+        // 3. Efficiency Assessment (Flow & XDP Aware)
+        let total_rx_pps = app.current_rx_pps;
+        let zc_pps = app.current_xdp_redirect_pps;
+        let skb_pps = (total_rx_pps - zc_pps).max(0.0);
         
-        let (eff_color, eff_text) = if total_pps < 100.0 {
-            (Color::DarkGray, "Awaiting sufficient traffic flow (>100 pps) to accurately analyze RSS hashing efficiency...".to_string())
+        let zc_ratio = if total_rx_pps > 10.0 { ((zc_pps / total_rx_pps) * 100.0).clamp(0.0, 100.0) } else { 0.0 };
+        let skb_ratio = if total_rx_pps > 10.0 { 100.0 - zc_ratio } else { 0.0 };
+
+        let c_count = app.physical_cores;
+        let active_queues = app.rx_queue_pps.values().filter(|&&pps| pps > 5.0).count();
+
+        let traffic_profile = format!(
+            "Traffic Profile: {} pps (Total RX)  |  AF_XDP Zero-Copy: {} pps ({:.1}%)  |  Linux SKB: {} pps ({:.1}%)",
+            format_pps(total_rx_pps),
+            format_pps(zc_pps),
+            zc_ratio,
+            format_pps(skb_pps),
+            skb_ratio
+        );
+
+        let (eff_color, eff_text) = if total_rx_pps < 100.0 {
+            (Color::DarkGray, "Awaiting sufficient traffic flow (>100 pps) to accurately analyze XDP & RSS efficiency...".to_string())
         } else {
-            let active_queues = app.rx_queue_pps.values().filter(|&&pps| pps > 5.0).count();
-            if active_queues == 0 {
-                (Color::Yellow, format!("Traffic flowing ({} pps), but driver is not reporting per-queue stats via ethtool.", format_pps(total_pps)))
+            let queue_status = if active_queues == 0 {
+                "No queue stats".to_string()
             } else if active_queues <= c_count {
-                (Color::Green, format!("OPTIMAL: Traffic is perfectly distributed across {} active queues, fitting within {} physical cores.", active_queues, c_count))
+                format!("RSS: Optimal ({} Qs / {} Cores)", active_queues, c_count)
             } else {
-                (Color::Red, format!("SUBOPTIMAL: Traffic is scattered across {} active queues, exceeding {} physical cores. Expect context switching overhead.", active_queues, c_count))
-            }
+                format!("RSS: Suboptimal ({} Qs > {} Cores)", active_queues, c_count)
+            };
+
+            let zc_status = if info.xdp_is_zerocopy && info.current_xdp_state.contains("NATIVE") {
+                if zc_ratio > 90.0 {
+                    format!("ZC Hit: {:.1}% (High Efficiency)", zc_ratio)
+                } else if zc_ratio > 50.0 {
+                    format!("ZC Hit: {:.1}% (Mixed Efficiency)", zc_ratio)
+                } else if zc_pps > 0.0 {
+                    format!("ZC Hit: {:.1}% (Poor Efficiency)", zc_ratio)
+                } else {
+                    "ZC Hit: 0% (All traffic bypassing XDP to standard SKB path)".to_string()
+                }
+            } else {
+                "Zero-Copy Unavailable (Using standard SKB/Software fallback)".to_string()
+            };
+
+            let final_text = format!("{}  |  {}", queue_status, zc_status);
+            
+            let color = if zc_ratio > 80.0 && active_queues <= c_count {
+                Color::Green
+            } else if zc_ratio < 20.0 || active_queues > c_count {
+                Color::Red
+            } else {
+                Color::Yellow
+            };
+
+            (color, final_text)
         };
 
-        let eff_paragraph = Paragraph::new(Line::from(Span::styled(eff_text, Style::default().fg(eff_color).add_modifier(Modifier::BOLD))))
-            .block(Block::default().borders(Borders::ALL).title(" Live Data Flow Efficiency Assessment "));
+        let eff_paragraph = Paragraph::new(vec![
+            Line::from(Span::styled(traffic_profile, Style::default().fg(Color::Cyan))),
+            Line::from(""), // spacing
+            Line::from(Span::styled(eff_text, Style::default().fg(eff_color).add_modifier(Modifier::BOLD))),
+        ])
+        .block(Block::default().borders(Borders::ALL).title(" Live Data Flow Efficiency Assessment "));
         f.render_widget(eff_paragraph, chunks[2]);
     }
 
-    // Calculate dynamic indices based on throughput toggle
-    let rx_chunk_idx = if app.show_throughput { 4 } else { 3 };
-    let tx_chunk_idx = if app.show_throughput { 5 } else { 4 };
+    let rx_chunk_idx = 3;
+    let tx_chunk_idx = 4;
 
-    // 4. Traffic Sparklines (Conditional)
-    if app.show_throughput {
+    // 4. Dense RX Queue Distribution BarChart
+    let mut rx_bars = Vec::new();
+    let mut rx_labels = Vec::new(); 
+    let mut sorted_rx: Vec<_> = app.rx_queue_pps.iter().collect();
+    sorted_rx.sort_by_key(|k| k.0);
+
+    for (q_id, _) in &sorted_rx { rx_labels.push(q_id.to_string()); }
+    for (i, (_, pps)) in sorted_rx.into_iter().enumerate() {
+        rx_bars.push(Bar::default().label(rx_labels[i].as_str().into()).value(*pps as u64));
+    }
+
+    if rx_bars.is_empty() {
+        let no_data = Paragraph::new("No per-queue statistics available for this driver.")
+            .block(Block::default().borders(Borders::ALL).title(" RX Queue Load Distribution (PPS) "));
+        f.render_widget(no_data, chunks[rx_chunk_idx]);
+    } else {
+        let rx_barchart = BarChart::default()
+            .block(Block::default().title(" RX Queue Load Distribution (PPS) ").borders(Borders::ALL))
+            .data(ratatui::widgets::BarGroup::default().bars(&rx_bars))
+            .bar_width(2) 
+            .bar_gap(1)
+            .bar_style(Style::default().fg(Color::Green))
+            .value_style(Style::default().fg(Color::Black).bg(Color::Green));
+        f.render_widget(rx_barchart, chunks[rx_chunk_idx]);
+    }
+
+    // 5. Dense TX Queue Distribution BarChart
+    let mut tx_bars = Vec::new();
+    let mut tx_labels = Vec::new(); 
+    let mut sorted_tx: Vec<_> = app.tx_queue_pps.iter().collect();
+    sorted_tx.sort_by_key(|k| k.0);
+
+    for (q_id, _) in &sorted_tx { tx_labels.push(q_id.to_string()); }
+    for (i, (_, pps)) in sorted_tx.into_iter().enumerate() {
+        tx_bars.push(Bar::default().label(tx_labels[i].as_str().into()).value(*pps as u64));
+    }
+
+    if tx_bars.is_empty() {
+        let no_data = Paragraph::new("No per-queue statistics available for this driver.")
+            .block(Block::default().borders(Borders::ALL).title(" TX Queue Load Distribution (PPS) "));
+        f.render_widget(no_data, chunks[tx_chunk_idx]);
+    } else {
+        let tx_barchart = BarChart::default()
+            .block(Block::default().title(" TX Queue Load Distribution (PPS) ").borders(Borders::ALL))
+            .data(ratatui::widgets::BarGroup::default().bars(&tx_bars))
+            .bar_width(2)
+            .bar_gap(1)
+            .bar_style(Style::default().fg(Color::Blue))
+            .value_style(Style::default().fg(Color::Black).bg(Color::Blue));
+        f.render_widget(tx_barchart, chunks[tx_chunk_idx]);
+    }
+
+    // 6. Traffic Sparklines (Conditional, Index 5)
+    if actually_show_throughput {
         let spark_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(chunks[3]);
+            .split(chunks[5]);
 
         let rx_data: Vec<u64> = app.rx_bytes_history.iter().copied().collect();
         let rx_title = format!(" RX Throughput: {} | {} ", format_bps(app.current_rx_bps), format_pps(app.current_rx_pps));
@@ -207,58 +314,7 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
         f.render_widget(tx_sparkline, spark_chunks[1]);
     }
 
-    // 5. Dense Queue Distribution BarCharts
-    let mut rx_bars = Vec::new();
-    let mut rx_labels = Vec::new(); 
-    let mut sorted_rx: Vec<_> = app.rx_queue_pps.iter().collect();
-    sorted_rx.sort_by_key(|k| k.0);
-
-    for (q_id, _) in &sorted_rx { rx_labels.push(q_id.to_string()); } // Removed 'Q' prefix
-    for (i, (_, pps)) in sorted_rx.into_iter().enumerate() {
-        rx_bars.push(Bar::default().label(rx_labels[i].as_str().into()).value(*pps as u64));
-    }
-
-    if rx_bars.is_empty() {
-        let no_data = Paragraph::new("No per-queue statistics available for this driver.")
-            .block(Block::default().borders(Borders::ALL).title(" RX Queue Load Distribution (PPS) "));
-        f.render_widget(no_data, chunks[rx_chunk_idx]);
-    } else {
-        let rx_barchart = BarChart::default()
-            .block(Block::default().title(" RX Queue Load Distribution (PPS) ").borders(Borders::ALL))
-            .data(ratatui::widgets::BarGroup::default().bars(&rx_bars))
-            .bar_width(2) // Condensed to fit 60+ channels
-            .bar_gap(1)
-            .bar_style(Style::default().fg(Color::Green))
-            .value_style(Style::default().fg(Color::Black).bg(Color::Green));
-        f.render_widget(rx_barchart, chunks[rx_chunk_idx]);
-    }
-
-    let mut tx_bars = Vec::new();
-    let mut tx_labels = Vec::new(); 
-    let mut sorted_tx: Vec<_> = app.tx_queue_pps.iter().collect();
-    sorted_tx.sort_by_key(|k| k.0);
-
-    for (q_id, _) in &sorted_tx { tx_labels.push(q_id.to_string()); } // Removed 'Q' prefix
-    for (i, (_, pps)) in sorted_tx.into_iter().enumerate() {
-        tx_bars.push(Bar::default().label(tx_labels[i].as_str().into()).value(*pps as u64));
-    }
-
-    if tx_bars.is_empty() {
-        let no_data = Paragraph::new("No per-queue statistics available for this driver.")
-            .block(Block::default().borders(Borders::ALL).title(" TX Queue Load Distribution (PPS) "));
-        f.render_widget(no_data, chunks[tx_chunk_idx]);
-    } else {
-        let tx_barchart = BarChart::default()
-            .block(Block::default().title(" TX Queue Load Distribution (PPS) ").borders(Borders::ALL))
-            .data(ratatui::widgets::BarGroup::default().bars(&tx_bars))
-            .bar_width(2) // Condensed
-            .bar_gap(1)
-            .bar_style(Style::default().fg(Color::Blue))
-            .value_style(Style::default().fg(Color::Black).bg(Color::Blue));
-        f.render_widget(tx_barchart, chunks[tx_chunk_idx]);
-    }
-
-    // 6. OVERLAYS (Popups)
+    // 7. OVERLAYS (Popups)
     if app.mode == AppMode::NicMenu {
         let popup_area = centered_rect(40, 50, f.size());
         f.render_widget(Clear, popup_area); 

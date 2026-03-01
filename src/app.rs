@@ -77,6 +77,10 @@ pub struct App {
     pub current_rx_pps: f64,
     pub current_tx_pps: f64,
 
+    // XDP Efficiency History
+    pub last_xdp_redirect_packets: u64,
+    pub current_xdp_redirect_pps: f64,
+
     // RX Queue History
     pub rx_queue_packets: BTreeMap<usize, u64>,
     pub last_rx_queue_packets: BTreeMap<usize, u64>,
@@ -184,6 +188,9 @@ impl App {
             current_rx_pps: 0.0,
             current_tx_pps: 0.0,
 
+            last_xdp_redirect_packets: 0,
+            current_xdp_redirect_pps: 0.0,
+
             rx_queue_packets: BTreeMap::new(),
             last_rx_queue_packets: BTreeMap::new(),
             rx_queue_pps: BTreeMap::new(),
@@ -228,6 +235,9 @@ impl App {
         self.last_rx_packets = 0;
         self.last_tx_packets = 0;
         
+        self.last_xdp_redirect_packets = 0;
+        self.current_xdp_redirect_pps = 0.0;
+
         self.rx_queue_packets.clear();
         self.last_rx_queue_packets.clear();
         self.rx_queue_pps.clear();
@@ -388,7 +398,10 @@ impl App {
             
             let rx_re = Regex::new(r"rx[_-]?(?:queue[_-]?)?(\d+)[_\.]?packets:\s+(\d+)").unwrap();
             let tx_re = Regex::new(r"tx[_-]?(?:queue[_-]?)?(\d+)[_\.]?packets:\s+(\d+)").unwrap();
+            let xdp_redirect_re = Regex::new(r"(?i).*xdp_redirect.*:\s+(\d+)").unwrap();
             
+            let mut total_xdp_redirect: u64 = 0;
+
             for cap in rx_re.captures_iter(&stdout) {
                 if let (Ok(q_id), Ok(pkts)) = (cap[1].parse::<usize>(), cap[2].parse::<u64>()) {
                     let last_pkts = self.last_rx_queue_packets.get(&q_id).copied().unwrap_or(pkts);
@@ -410,6 +423,18 @@ impl App {
                     self.tx_queue_packets.insert(q_id, pkts);
                 }
             }
+
+            for cap in xdp_redirect_re.captures_iter(&stdout) {
+                if let Ok(val) = cap[1].parse::<u64>() {
+                    total_xdp_redirect += val;
+                }
+            }
+
+            if self.last_xdp_redirect_packets > 0 {
+                let xdp_diff = total_xdp_redirect.saturating_sub(self.last_xdp_redirect_packets);
+                self.current_xdp_redirect_pps = xdp_diff as f64 / elapsed;
+            }
+            self.last_xdp_redirect_packets = total_xdp_redirect;
 
             self.last_rx_queue_packets = self.rx_queue_packets.clone();
             self.last_tx_queue_packets = self.tx_queue_packets.clone();
