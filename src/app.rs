@@ -1,3 +1,4 @@
+// src/app.rs
 use ratatui::{layout::Rect, widgets::ListState};
 use regex::Regex;
 use std::{
@@ -41,7 +42,7 @@ pub struct NicInfo {
 
 pub struct App {
     pub networks: Networks,
-    pub nics: Vec<(String, bool)>, // (Name, IsZeroCopyCapable)
+    pub nics: Vec<(String, bool)>, 
     
     pub mode: AppMode,
     pub focus: Option<Focus>,
@@ -53,7 +54,6 @@ pub struct App {
 
     pub current_nic_info: Option<NicInfo>,
 
-    // Mouse tracking for UI elements
     pub mouse_pos: (u16, u16),
     pub btn_nic_rect: Rect,
     pub btn_toggle_rect: Rect,
@@ -63,7 +63,6 @@ pub struct App {
     pub list_rect: Rect,
     pub hovered_nic_idx: Option<usize>,
 
-    // Global History
     pub rx_bytes_history: VecDeque<u64>,
     pub tx_bytes_history: VecDeque<u64>,
     
@@ -77,16 +76,17 @@ pub struct App {
     pub current_rx_pps: f64,
     pub current_tx_pps: f64,
 
-    // XDP Efficiency History
     pub last_xdp_redirect_packets: u64,
     pub current_xdp_redirect_pps: f64,
 
-    // RX Queue History
     pub rx_queue_packets: BTreeMap<usize, u64>,
     pub last_rx_queue_packets: BTreeMap<usize, u64>,
     pub rx_queue_pps: BTreeMap<usize, f64>,
 
-    // TX Queue History
+    pub rx_queue_xdp_packets: BTreeMap<usize, u64>,
+    pub last_rx_queue_xdp_packets: BTreeMap<usize, u64>,
+    pub rx_queue_xdp_pps: BTreeMap<usize, f64>,
+
     pub tx_queue_packets: BTreeMap<usize, u64>,
     pub last_tx_queue_packets: BTreeMap<usize, u64>,
     pub tx_queue_pps: BTreeMap<usize, f64>,
@@ -96,6 +96,50 @@ pub struct App {
 }
 
 impl App {
+    pub fn new_empty() -> Self {
+        Self {
+            networks: Networks::new(),
+            nics: vec![],
+            mode: AppMode::Normal,
+            focus: None,
+            selected_idx: 0,
+            menu_state: ListState::default(),
+            show_throughput: true,
+            physical_cores: 4,
+            current_nic_info: None,
+            mouse_pos: (0, 0),
+            btn_nic_rect: Rect::default(),
+            btn_toggle_rect: Rect::default(),
+            btn_about_rect: Rect::default(),
+            btn_quit_rect: Rect::default(),
+            list_rect: Rect::default(),
+            hovered_nic_idx: None,
+            rx_bytes_history: vec![0; SPARKLINE_LEN].into_iter().collect(),
+            tx_bytes_history: vec![0; SPARKLINE_LEN].into_iter().collect(),
+            last_rx_bytes: 0,
+            last_tx_bytes: 0,
+            last_rx_packets: 0,
+            last_tx_packets: 0,
+            current_rx_bps: 0.0,
+            current_tx_bps: 0.0,
+            current_rx_pps: 0.0,
+            current_tx_pps: 0.0,
+            last_xdp_redirect_packets: 0,
+            current_xdp_redirect_pps: 0.0,
+            rx_queue_packets: BTreeMap::new(),
+            last_rx_queue_packets: BTreeMap::new(),
+            rx_queue_pps: BTreeMap::new(),
+            rx_queue_xdp_packets: BTreeMap::new(),
+            last_rx_queue_xdp_packets: BTreeMap::new(),
+            rx_queue_xdp_pps: BTreeMap::new(),
+            tx_queue_packets: BTreeMap::new(),
+            last_tx_queue_packets: BTreeMap::new(),
+            tx_queue_pps: BTreeMap::new(),
+            last_update: Instant::now(),
+            quit: false,
+        }
+    }
+
     pub fn new() -> Self {
         let mut sys = System::new_all();
         sys.refresh_all();
@@ -103,7 +147,6 @@ impl App {
         
         let mut temp_nics: Vec<(String, bool, u64)> = Vec::new();
         
-        // Filter strictly to hardware-backed NICs and probe capabilities
         for (name, net_data) in networks.iter() {
             let device_path = format!("/sys/class/net/{}/device", name);
             if std::fs::metadata(&device_path).is_ok() {
@@ -127,7 +170,6 @@ impl App {
             temp_nics.push(("lo".to_string(), false, 0));
         }
 
-        // Auto-detect the most capable XDP NIC based on capabilities + live traffic
         let mut best_idx = 0;
         let mut best_score: u64 = 0;
         
@@ -150,58 +192,17 @@ impl App {
         }
 
         let nics = temp_nics.into_iter().map(|(n, z, _)| (n, z)).collect();
-
         let physical_cores = sys.physical_core_count().unwrap_or_else(|| sys.cpus().len());
 
         let mut menu_state = ListState::default();
         menu_state.select(Some(best_idx));
 
-        let mut app = Self {
-            networks,
-            nics,
-            mode: AppMode::Normal,
-            focus: None,
-            selected_idx: best_idx,
-            menu_state,
-            show_throughput: true,
-            physical_cores,
-            current_nic_info: None,
-            
-            mouse_pos: (0, 0),
-            btn_nic_rect: Rect::default(),
-            btn_toggle_rect: Rect::default(),
-            btn_about_rect: Rect::default(),
-            btn_quit_rect: Rect::default(),
-            list_rect: Rect::default(),
-            hovered_nic_idx: None,
-
-            rx_bytes_history: vec![0; SPARKLINE_LEN].into_iter().collect(),
-            tx_bytes_history: vec![0; SPARKLINE_LEN].into_iter().collect(),
-            
-            last_rx_bytes: 0,
-            last_tx_bytes: 0,
-            last_rx_packets: 0,
-            last_tx_packets: 0,
-            
-            current_rx_bps: 0.0,
-            current_tx_bps: 0.0,
-            current_rx_pps: 0.0,
-            current_tx_pps: 0.0,
-
-            last_xdp_redirect_packets: 0,
-            current_xdp_redirect_pps: 0.0,
-
-            rx_queue_packets: BTreeMap::new(),
-            last_rx_queue_packets: BTreeMap::new(),
-            rx_queue_pps: BTreeMap::new(),
-
-            tx_queue_packets: BTreeMap::new(),
-            last_tx_queue_packets: BTreeMap::new(),
-            tx_queue_pps: BTreeMap::new(),
-
-            last_update: Instant::now(),
-            quit: false,
-        };
+        let mut app = Self::new_empty();
+        app.networks = networks;
+        app.nics = nics;
+        app.selected_idx = best_idx;
+        app.menu_state = menu_state;
+        app.physical_cores = physical_cores;
 
         app.fetch_nic_info();
         app
@@ -241,6 +242,10 @@ impl App {
         self.rx_queue_packets.clear();
         self.last_rx_queue_packets.clear();
         self.rx_queue_pps.clear();
+
+        self.rx_queue_xdp_packets.clear();
+        self.last_rx_queue_xdp_packets.clear();
+        self.rx_queue_xdp_pps.clear();
 
         self.tx_queue_packets.clear();
         self.last_tx_queue_packets.clear();
@@ -288,13 +293,15 @@ impl App {
         let mut mac_address = String::from("Unknown");
         if let Ok(output) = Command::new("ip").arg("-details").arg("link").arg("show").arg("dev").arg(nic_name).output() {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            if stdout.contains("xdpdrv") {
+            
+            // --- FIX: Modern iproute2 detection ('xdp ' vs 'xdpdrv') ---
+            if stdout.contains("xdpdrv") || (stdout.contains("xdp ") && !stdout.contains("xdpgeneric")) {
                 current_xdp_state = "Active - NATIVE (drv)".to_string();
             } else if stdout.contains("xdpgeneric") {
                 current_xdp_state = "Active - GENERIC (skb)".to_string();
             } else if stdout.contains("xdpoffload") {
                 current_xdp_state = "Active - OFFLOAD (hw)".to_string();
-            } else if stdout.contains("xdp ") {
+            } else if stdout.contains("xdp") {
                 current_xdp_state = "Active - Unknown Mode".to_string();
             }
             
@@ -361,6 +368,71 @@ impl App {
         });
     }
 
+    pub fn parse_ethtool_output(&mut self, stdout: &str, elapsed: f64) {
+        // --- FIX: Hardened Regexes to support AWS ENA, Mellanox, Intel, and Broadcom ---
+        let rx_re = Regex::new(r"(?i)(?:^|\s)(?:port\.|vport_|rx_)?(?:rx|q|queue)[^\d]*(\d+)[^\s]*?(?:packets|pkts|cnt):\s+(\d+)").unwrap();
+        let tx_re = Regex::new(r"(?i)(?:^|\s)(?:port\.|vport_|tx_)?(?:tx|q|queue)[^\d]*(\d+)[^\s]*?(?:packets|pkts|cnt):\s+(\d+)").unwrap();
+        let xdp_redirect_re = Regex::new(r"(?i)(?:^|\s).*xdp(?:_redirect|_tx|_drop|_packets|_pkts)?.*:\s+(\d+)").unwrap();
+        let rx_xdp_re = Regex::new(r"(?i)(?:^|\s)(?:port\.|vport_|rx_)?(?:rx|q|queue)[^\d]*(\d+)[^\s]*xdp[^\s]*:\s+(\d+)").unwrap();
+        
+        let mut total_xdp_redirect: u64 = 0;
+
+        self.rx_queue_xdp_pps.clear();
+        self.rx_queue_xdp_packets.clear();
+
+        for cap in rx_re.captures_iter(stdout) {
+            if let (Ok(q_id), Ok(pkts)) = (cap[1].parse::<usize>(), cap[2].parse::<u64>()) {
+                let last_pkts = self.last_rx_queue_packets.get(&q_id).copied().unwrap_or(pkts);
+                let diff = pkts.saturating_sub(last_pkts);
+                let pps = diff as f64 / elapsed;
+                
+                self.rx_queue_pps.insert(q_id, pps);
+                self.rx_queue_packets.insert(q_id, pkts);
+            }
+        }
+
+        for cap in rx_xdp_re.captures_iter(stdout) {
+            if let (Ok(q_id), Ok(pkts)) = (cap[1].parse::<usize>(), cap[2].parse::<u64>()) {
+                let current = self.rx_queue_xdp_packets.entry(q_id).or_insert(0);
+                *current += pkts;
+            }
+        }
+
+        for (&q_id, &pkts) in &self.rx_queue_xdp_packets {
+            let last_pkts = self.last_rx_queue_xdp_packets.get(&q_id).copied().unwrap_or(pkts);
+            let diff = pkts.saturating_sub(last_pkts);
+            let pps = diff as f64 / elapsed;
+            self.rx_queue_xdp_pps.insert(q_id, pps);
+        }
+        self.last_rx_queue_xdp_packets = self.rx_queue_xdp_packets.clone();
+
+        for cap in tx_re.captures_iter(stdout) {
+            if let (Ok(q_id), Ok(pkts)) = (cap[1].parse::<usize>(), cap[2].parse::<u64>()) {
+                let last_pkts = self.last_tx_queue_packets.get(&q_id).copied().unwrap_or(pkts);
+                let diff = pkts.saturating_sub(last_pkts);
+                let pps = diff as f64 / elapsed;
+                
+                self.tx_queue_pps.insert(q_id, pps);
+                self.tx_queue_packets.insert(q_id, pkts);
+            }
+        }
+
+        for cap in xdp_redirect_re.captures_iter(stdout) {
+            if let Ok(val) = cap[1].parse::<u64>() {
+                total_xdp_redirect += val;
+            }
+        }
+
+        if self.last_xdp_redirect_packets > 0 {
+            let xdp_diff = total_xdp_redirect.saturating_sub(self.last_xdp_redirect_packets);
+            self.current_xdp_redirect_pps = xdp_diff as f64 / elapsed;
+        }
+        self.last_xdp_redirect_packets = total_xdp_redirect;
+
+        self.last_rx_queue_packets = self.rx_queue_packets.clone();
+        self.last_tx_queue_packets = self.tx_queue_packets.clone();
+    }
+
     pub fn update_stats(&mut self) {
         let nic_name = self.nics[self.selected_idx].0.clone();
         self.networks.refresh();
@@ -395,49 +467,7 @@ impl App {
 
         if let Ok(output) = Command::new("ethtool").arg("-S").arg(&nic_name).output() {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            
-            let rx_re = Regex::new(r"rx[_-]?(?:queue[_-]?)?(\d+)[_\.]?packets:\s+(\d+)").unwrap();
-            let tx_re = Regex::new(r"tx[_-]?(?:queue[_-]?)?(\d+)[_\.]?packets:\s+(\d+)").unwrap();
-            let xdp_redirect_re = Regex::new(r"(?i).*xdp_redirect.*:\s+(\d+)").unwrap();
-            
-            let mut total_xdp_redirect: u64 = 0;
-
-            for cap in rx_re.captures_iter(&stdout) {
-                if let (Ok(q_id), Ok(pkts)) = (cap[1].parse::<usize>(), cap[2].parse::<u64>()) {
-                    let last_pkts = self.last_rx_queue_packets.get(&q_id).copied().unwrap_or(pkts);
-                    let diff = pkts.saturating_sub(last_pkts);
-                    let pps = diff as f64 / elapsed;
-                    
-                    self.rx_queue_pps.insert(q_id, pps);
-                    self.rx_queue_packets.insert(q_id, pkts);
-                }
-            }
-
-            for cap in tx_re.captures_iter(&stdout) {
-                if let (Ok(q_id), Ok(pkts)) = (cap[1].parse::<usize>(), cap[2].parse::<u64>()) {
-                    let last_pkts = self.last_tx_queue_packets.get(&q_id).copied().unwrap_or(pkts);
-                    let diff = pkts.saturating_sub(last_pkts);
-                    let pps = diff as f64 / elapsed;
-                    
-                    self.tx_queue_pps.insert(q_id, pps);
-                    self.tx_queue_packets.insert(q_id, pkts);
-                }
-            }
-
-            for cap in xdp_redirect_re.captures_iter(&stdout) {
-                if let Ok(val) = cap[1].parse::<u64>() {
-                    total_xdp_redirect += val;
-                }
-            }
-
-            if self.last_xdp_redirect_packets > 0 {
-                let xdp_diff = total_xdp_redirect.saturating_sub(self.last_xdp_redirect_packets);
-                self.current_xdp_redirect_pps = xdp_diff as f64 / elapsed;
-            }
-            self.last_xdp_redirect_packets = total_xdp_redirect;
-
-            self.last_rx_queue_packets = self.rx_queue_packets.clone();
-            self.last_tx_queue_packets = self.tx_queue_packets.clone();
+            self.parse_ethtool_output(&stdout, elapsed);
         }
 
         self.last_update = now;

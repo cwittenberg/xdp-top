@@ -1,3 +1,4 @@
+// src/ui.rs
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -170,7 +171,11 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
 
         // 3. Efficiency Assessment (Flow & XDP Aware)
         let total_rx_pps = app.current_rx_pps;
-        let zc_pps = app.current_xdp_redirect_pps;
+        
+        // Dynamically measure ZC based on XDP packets observed on the wire.
+        let dynamic_xdp_pps = app.rx_queue_xdp_pps.values().sum::<f64>();
+        let zc_pps = dynamic_xdp_pps.max(app.current_xdp_redirect_pps);
+        
         let skb_pps = (total_rx_pps - zc_pps).max(0.0);
         
         let zc_ratio = if total_rx_pps > 10.0 { ((zc_pps / total_rx_pps) * 100.0).clamp(0.0, 100.0) } else { 0.0 };
@@ -180,7 +185,7 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
         let active_queues = app.rx_queue_pps.values().filter(|&&pps| pps > 5.0).count();
 
         let traffic_profile = format!(
-            "Traffic Profile: {} pps (Total RX)  |  AF_XDP Zero-Copy: {} pps ({:.1}%)  |  Linux SKB: {} pps ({:.1}%)",
+            "Traffic Profile: {} pps (Total RX)  |  AF_XDP/ZC: {} pps ({:.1}%)  |  SKB: {} pps ({:.1}%)",
             format_pps(total_rx_pps),
             format_pps(zc_pps),
             zc_ratio,
@@ -199,18 +204,16 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
                 format!("RSS: Suboptimal ({} Qs > {} Cores)", active_queues, c_count)
             };
 
-            let zc_status = if info.xdp_is_zerocopy && info.current_xdp_state.contains("NATIVE") {
+            let zc_status = if zc_pps > 0.0 {
                 if zc_ratio > 90.0 {
-                    format!("ZC Hit: {:.1}% (High Efficiency)", zc_ratio)
-                } else if zc_ratio > 50.0 {
-                    format!("ZC Hit: {:.1}% (Mixed Efficiency)", zc_ratio)
-                } else if zc_pps > 0.0 {
-                    format!("ZC Hit: {:.1}% (Poor Efficiency)", zc_ratio)
+                    format!("ZC Hit: {:.1}% (High Efficiency - XDP Active)", zc_ratio)
+                } else if zc_ratio > 10.0 {
+                    format!("ZC Hit: {:.1}% (Mixed Efficiency - Partial XDP)", zc_ratio)
                 } else {
-                    "ZC Hit: 0% (All traffic bypassing XDP to standard SKB path)".to_string()
+                    format!("ZC Hit: {:.1}% (Low Efficiency - Mostly SKB)", zc_ratio)
                 }
             } else {
-                "Zero-Copy Unavailable (Using standard SKB/Software fallback)".to_string()
+                "Zero-Copy Inactive (Using standard SKB/Software path)".to_string()
             };
 
             let final_text = format!("{}  |  {}", queue_status, zc_status);
@@ -245,8 +248,18 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
     sorted_rx.sort_by_key(|k| k.0);
 
     for (q_id, _) in &sorted_rx { rx_labels.push(q_id.to_string()); }
-    for (i, (_, pps)) in sorted_rx.into_iter().enumerate() {
-        rx_bars.push(Bar::default().label(rx_labels[i].as_str().into()).value(*pps as u64));
+    for (i, (&q_id, &pps)) in sorted_rx.into_iter().enumerate() {
+        let xdp_pps = app.rx_queue_xdp_pps.get(&q_id).copied().unwrap_or(0.0);
+        let is_zc = xdp_pps > (pps * 0.1) || xdp_pps > 10.0;
+        let bar_color = if is_zc { Color::Cyan } else { Color::Green };
+        
+        rx_bars.push(
+            Bar::default()
+                .label(rx_labels[i].as_str().into())
+                .value(pps as u64)
+                .style(Style::default().fg(bar_color))
+                .value_style(Style::default().bg(bar_color).fg(Color::Black))
+        );
     }
 
     if rx_bars.is_empty() {
@@ -254,13 +267,17 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
             .block(Block::default().borders(Borders::ALL).title(" RX Queue Load Distribution (PPS) "));
         f.render_widget(no_data, chunks[rx_chunk_idx]);
     } else {
+        let rx_title = Line::from(vec![
+            Span::raw(" RX Queue Load Distribution (PPS) "),
+            Span::styled("[Cyan: XDP/Zero-Copy | Green: SKB]", Style::default().fg(Color::Cyan)),
+            Span::raw(" "),
+        ]);
+
         let rx_barchart = BarChart::default()
-            .block(Block::default().title(" RX Queue Load Distribution (PPS) ").borders(Borders::ALL))
+            .block(Block::default().title(rx_title).borders(Borders::ALL))
             .data(ratatui::widgets::BarGroup::default().bars(&rx_bars))
             .bar_width(2) 
-            .bar_gap(1)
-            .bar_style(Style::default().fg(Color::Green))
-            .value_style(Style::default().fg(Color::Black).bg(Color::Green));
+            .bar_gap(1);
         f.render_widget(rx_barchart, chunks[rx_chunk_idx]);
     }
 
