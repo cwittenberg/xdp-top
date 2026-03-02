@@ -8,7 +8,7 @@ Understanding if XDP is working correctly utilizing the hardware's full capabili
 ## How?
 XDP-TOP is a terminal-based user interface built in Rust that provides real-time insights into your network interfaces. It tracks hardware capabilities, XDP attachment states, global throughput, and fine-grained per-queue traffic distribution to help you evaluate RSS (Receive Side Scaling) hashing efficiency and overall data flow.
 
-<img width="2859" height="1722" alt="image" src="https://github.com/user-attachments/assets/5a7f4a57-7366-49a3-8fde-0e0fb0709fbd" />
+<img width="2206" height="1281" alt="image" src="https://github.com/user-attachments/assets/14e3b8fc-6fdf-425d-9a42-4a3679c6d00d" />
 
 
 ## Features
