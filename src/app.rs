@@ -21,6 +21,7 @@ pub enum AppMode {
 pub enum Focus {
     NicBtn,
     ToggleBtn,
+    FilterBtn,
     AboutBtn,
     QuitBtn,
 }
@@ -49,6 +50,7 @@ pub struct App {
     pub selected_idx: usize,
     pub menu_state: ListState,
     pub show_throughput: bool,
+    pub filter_drv_only: bool,
 
     pub physical_cores: usize,
 
@@ -57,6 +59,7 @@ pub struct App {
     pub mouse_pos: (u16, u16),
     pub btn_nic_rect: Rect,
     pub btn_toggle_rect: Rect,
+    pub btn_filter_rect: Rect,
     pub btn_about_rect: Rect,
     pub btn_quit_rect: Rect,
     
@@ -105,11 +108,13 @@ impl App {
             selected_idx: 0,
             menu_state: ListState::default(),
             show_throughput: true,
+            filter_drv_only: false,
             physical_cores: 4,
             current_nic_info: None,
             mouse_pos: (0, 0),
             btn_nic_rect: Rect::default(),
             btn_toggle_rect: Rect::default(),
+            btn_filter_rect: Rect::default(),
             btn_about_rect: Rect::default(),
             btn_quit_rect: Rect::default(),
             list_rect: Rect::default(),
@@ -294,7 +299,6 @@ impl App {
         if let Ok(output) = Command::new("ip").arg("-details").arg("link").arg("show").arg("dev").arg(nic_name).output() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             
-            // --- FIX: Modern iproute2 detection ('xdp ' vs 'xdpdrv') ---
             if stdout.contains("xdpdrv") || (stdout.contains("xdp ") && !stdout.contains("xdpgeneric")) {
                 current_xdp_state = "Active - NATIVE (drv)".to_string();
             } else if stdout.contains("xdpgeneric") {
@@ -369,7 +373,6 @@ impl App {
     }
 
     pub fn parse_ethtool_output(&mut self, stdout: &str, elapsed: f64) {
-        // --- FIX: Hardened Regexes to support AWS ENA, Mellanox, Intel, and Broadcom ---
         let rx_re = Regex::new(r"(?i)(?:^|\s)(?:port\.|vport_|rx_)?(?:rx|q|queue)[^\d]*(\d+)[^\s]*?(?:packets|pkts|cnt):\s+(\d+)").unwrap();
         let tx_re = Regex::new(r"(?i)(?:^|\s)(?:port\.|vport_|tx_)?(?:tx|q|queue)[^\d]*(\d+)[^\s]*?(?:packets|pkts|cnt):\s+(\d+)").unwrap();
         let xdp_redirect_re = Regex::new(r"(?i)(?:^|\s).*xdp(?:_redirect|_tx|_drop|_packets|_pkts)?.*:\s+(\d+)").unwrap();
@@ -379,8 +382,16 @@ impl App {
 
         self.rx_queue_xdp_pps.clear();
         self.rx_queue_xdp_packets.clear();
+        
+        self.rx_queue_pps.clear();
+        self.rx_queue_packets.clear();
 
         for cap in rx_re.captures_iter(stdout) {
+            let match_str = cap[0].to_lowercase();
+            if match_str.contains("xdp") {
+                continue;
+            }
+
             if let (Ok(q_id), Ok(pkts)) = (cap[1].parse::<usize>(), cap[2].parse::<u64>()) {
                 let last_pkts = self.last_rx_queue_packets.get(&q_id).copied().unwrap_or(pkts);
                 let diff = pkts.saturating_sub(last_pkts);
@@ -406,7 +417,15 @@ impl App {
         }
         self.last_rx_queue_xdp_packets = self.rx_queue_xdp_packets.clone();
 
+        self.tx_queue_pps.clear();
+        self.tx_queue_packets.clear();
+
         for cap in tx_re.captures_iter(stdout) {
+            let match_str = cap[0].to_lowercase();
+            if match_str.contains("xdp") || match_str.contains("rx") {
+                continue;
+            }
+
             if let (Ok(q_id), Ok(pkts)) = (cap[1].parse::<usize>(), cap[2].parse::<u64>()) {
                 let last_pkts = self.last_tx_queue_packets.get(&q_id).copied().unwrap_or(pkts);
                 let diff = pkts.saturating_sub(last_pkts);
@@ -439,7 +458,9 @@ impl App {
         
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_update).as_secs_f64();
-        if elapsed == 0.0 { return; }
+        
+        // Prevents division by extremely small numbers causing infinite PPS, leading to UI distortion
+        if elapsed < 0.1 { return; } 
 
         if let Some(network) = self.networks.get(&nic_name) {
             let rx_bytes = network.total_received();

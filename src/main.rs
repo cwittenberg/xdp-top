@@ -1,3 +1,4 @@
+// src/main.rs
 mod app;
 mod ui;
 
@@ -19,7 +20,6 @@ use std::{
 };
 use ui::{draw_ui, is_inside};
 
-/// Validates that required external Linux commands are available in the system PATH.
 fn check_os_dependencies() -> Result<(), String> {
     let deps = ["ip", "ethtool", "lspci"];
     let mut missing = Vec::new();
@@ -61,7 +61,8 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> Result<()> {
                                     app.focus = match app.focus {
                                         None => Some(Focus::NicBtn),
                                         Some(Focus::NicBtn) => Some(Focus::ToggleBtn),
-                                        Some(Focus::ToggleBtn) => Some(Focus::AboutBtn),
+                                        Some(Focus::ToggleBtn) => Some(Focus::FilterBtn),
+                                        Some(Focus::FilterBtn) => Some(Focus::AboutBtn),
                                         Some(Focus::AboutBtn) => Some(Focus::QuitBtn),
                                         Some(Focus::QuitBtn) => Some(Focus::NicBtn),
                                     };
@@ -71,7 +72,8 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> Result<()> {
                                         None => Some(Focus::QuitBtn),
                                         Some(Focus::NicBtn) => Some(Focus::QuitBtn),
                                         Some(Focus::ToggleBtn) => Some(Focus::NicBtn),
-                                        Some(Focus::AboutBtn) => Some(Focus::ToggleBtn),
+                                        Some(Focus::FilterBtn) => Some(Focus::ToggleBtn),
+                                        Some(Focus::AboutBtn) => Some(Focus::FilterBtn),
                                         Some(Focus::QuitBtn) => Some(Focus::AboutBtn),
                                     };
                                 }
@@ -83,6 +85,9 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> Result<()> {
                                         },
                                         Some(Focus::ToggleBtn) => {
                                             app.show_throughput = !app.show_throughput;
+                                        }
+                                        Some(Focus::FilterBtn) => {
+                                            app.filter_drv_only = !app.filter_drv_only;
                                         }
                                         Some(Focus::AboutBtn) => {
                                             app.mode = AppMode::About;
@@ -148,15 +153,16 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> Result<()> {
                         }
                     }
 
-                    // Execute actions ONLY on Mouse Release (Up) to prevent ANSI escape code leaks on quit.
                     if mouse_event.kind == MouseEventKind::Up(MouseButton::Left) {
                         match app.mode {
                             AppMode::Normal => {
-                                app.focus = None; // Reset keyboard focus if using mouse
+                                app.focus = None; 
                                 if is_inside(app.mouse_pos, app.btn_quit_rect) {
                                     app.quit = true;
                                 } else if is_inside(app.mouse_pos, app.btn_about_rect) {
                                     app.mode = AppMode::About;
+                                } else if is_inside(app.mouse_pos, app.btn_filter_rect) {
+                                    app.filter_drv_only = !app.filter_drv_only;
                                 } else if is_inside(app.mouse_pos, app.btn_toggle_rect) {
                                     app.show_throughput = !app.show_throughput;
                                 } else if is_inside(app.mouse_pos, app.btn_nic_rect) {
@@ -194,13 +200,11 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> Result<()> {
 }
 
 fn main() -> Result<()> {
-    // 1. Dependency Check First
     if let Err(e) = check_os_dependencies() {
         eprintln!("Startup Error:\n{}", e);
         std::process::exit(1);
     }
 
-    // 2. Setup Terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -211,9 +215,6 @@ fn main() -> Result<()> {
     let app = App::new();
     let res = run_app(&mut terminal, app);
 
-    // 3. Teardown (Mouse off -> Screen off -> Raw off)
-    // This strictly prevents the terminal from intercepting the mouse release event and 
-    // printing ANSI artifacts like "0;119;2m" into standard output on exit.
     let mut stdout = io::stdout();
     let _ = execute!(stdout, DisableMouseCapture);
     let _ = execute!(stdout, LeaveAlternateScreen);

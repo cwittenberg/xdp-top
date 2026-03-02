@@ -56,10 +56,11 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 }
 
 pub fn draw_ui(f: &mut Frame, app: &mut App) {
+    // Prevent UI distortion from stale terminal states during resizing
+    f.render_widget(Clear, f.size());
+
     let term_height = f.size().height;
 
-    // FIX: 80x20 Screen Layout Adjustment
-    // We require at least 30 rows to comfortably fit the throughput sparklines alongside everything else.
     let screen_allows_throughput = term_height >= 30;
     let actually_show_throughput = app.show_throughput && screen_allows_throughput;
 
@@ -83,22 +84,24 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
         .constraints(root_constraints)
         .split(f.size());
 
-    // 1. Header Row & Buttons
+    // 1. Header Row & Buttons - Optimized to fit in standard 80-col terminals without wrapping
     let header_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Min(25),      // Info block
-            Constraint::Length(18),   // Select NIC
-            Constraint::Length(23),   // Toggle Throughput
-            Constraint::Length(11),   // About
-            Constraint::Length(10),   // Quit
+            Constraint::Fill(1),      // Info block stretches to fill remaining space
+            Constraint::Length(14),   // Select NIC
+            Constraint::Length(15),   // Toggle Throughput
+            Constraint::Length(16),   // Toggle DRV Filter
+            Constraint::Length(9),    // About
+            Constraint::Length(8),    // Quit
         ])
         .split(chunks[0]);
 
     app.btn_nic_rect = header_chunks[1];
     app.btn_toggle_rect = header_chunks[2];
-    app.btn_about_rect = header_chunks[3];
-    app.btn_quit_rect = header_chunks[4];
+    app.btn_filter_rect = header_chunks[3];
+    app.btn_about_rect = header_chunks[4];
+    app.btn_quit_rect = header_chunks[5];
 
     let header_text = Line::from(vec![
         Span::styled(" XDP-TOP ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
@@ -113,27 +116,32 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
     let focus_btn_style = Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD);
 
     let nic_focused = app.focus == Some(Focus::NicBtn) || is_inside(app.mouse_pos, app.btn_nic_rect);
-    let nic_btn = Paragraph::new(" [ Select NIC ] ").alignment(Alignment::Center).block(Block::default().borders(Borders::ALL).style(if nic_focused { focus_btn_style } else { idle_btn_style }));
+    let nic_btn = Paragraph::new(" Select NIC ").alignment(Alignment::Center).block(Block::default().borders(Borders::ALL).style(if nic_focused { focus_btn_style } else { idle_btn_style }));
     f.render_widget(nic_btn, header_chunks[1]);
 
     let toggle_txt = if !actually_show_throughput && app.show_throughput {
-        " [ Hidden (Size) ] "
+        " Hidden "
     } else if app.show_throughput {
-        " [ Hide Throughput ] "
+        " Hide Graphs "
     } else {
-        " [ Show Throughput ] "
+        " Show Graphs "
     };
     let toggle_focused = app.focus == Some(Focus::ToggleBtn) || is_inside(app.mouse_pos, app.btn_toggle_rect);
     let toggle_btn = Paragraph::new(toggle_txt).alignment(Alignment::Center).block(Block::default().borders(Borders::ALL).style(if toggle_focused { focus_btn_style } else { idle_btn_style }));
     f.render_widget(toggle_btn, header_chunks[2]);
 
+    let filter_txt = if app.filter_drv_only { " DRV Only: ON " } else { " DRV Only: OFF " };
+    let filter_focused = app.focus == Some(Focus::FilterBtn) || is_inside(app.mouse_pos, app.btn_filter_rect);
+    let filter_btn = Paragraph::new(filter_txt).alignment(Alignment::Center).block(Block::default().borders(Borders::ALL).style(if filter_focused { focus_btn_style } else { idle_btn_style }));
+    f.render_widget(filter_btn, header_chunks[3]);
+
     let about_focused = app.focus == Some(Focus::AboutBtn) || is_inside(app.mouse_pos, app.btn_about_rect);
-    let about_btn = Paragraph::new(" [ About ] ").alignment(Alignment::Center).block(Block::default().borders(Borders::ALL).style(if about_focused { focus_btn_style } else { idle_btn_style }));
-    f.render_widget(about_btn, header_chunks[3]);
+    let about_btn = Paragraph::new(" About ").alignment(Alignment::Center).block(Block::default().borders(Borders::ALL).style(if about_focused { focus_btn_style } else { idle_btn_style }));
+    f.render_widget(about_btn, header_chunks[4]);
 
     let quit_focused = app.focus == Some(Focus::QuitBtn) || is_inside(app.mouse_pos, app.btn_quit_rect);
-    let quit_btn = Paragraph::new(" [ Quit ] ").alignment(Alignment::Center).block(Block::default().borders(Borders::ALL).style(if quit_focused { focus_btn_style } else { idle_btn_style }));
-    f.render_widget(quit_btn, header_chunks[4]);
+    let quit_btn = Paragraph::new(" Quit ").alignment(Alignment::Center).block(Block::default().borders(Borders::ALL).style(if quit_focused { focus_btn_style } else { idle_btn_style }));
+    f.render_widget(quit_btn, header_chunks[5]);
 
     // 2. NIC Info (Split Horizontally)
     let info_chunks = Layout::default()
@@ -172,7 +180,6 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
         // 3. Efficiency Assessment (Flow & XDP Aware)
         let total_rx_pps = app.current_rx_pps;
         
-        // Dynamically measure ZC based on XDP packets observed on the wire.
         let dynamic_xdp_pps = app.rx_queue_xdp_pps.values().sum::<f64>();
         let zc_pps = dynamic_xdp_pps.max(app.current_xdp_redirect_pps);
         
@@ -250,13 +257,26 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
     for (q_id, _) in &sorted_rx { rx_labels.push(q_id.to_string()); }
     for (i, (&q_id, &pps)) in sorted_rx.into_iter().enumerate() {
         let xdp_pps = app.rx_queue_xdp_pps.get(&q_id).copied().unwrap_or(0.0);
+        
+        let display_pps = if app.filter_drv_only {
+            xdp_pps
+        } else {
+            pps
+        };
+
         let is_zc = xdp_pps > (pps * 0.1) || xdp_pps > 10.0;
-        let bar_color = if is_zc { Color::Cyan } else { Color::Green };
+        let bar_color = if app.filter_drv_only {
+            Color::Red
+        } else if is_zc {
+            Color::Red
+        } else {
+            Color::Green
+        };
         
         rx_bars.push(
             Bar::default()
                 .label(rx_labels[i].as_str().into())
-                .value(pps as u64)
+                .value(display_pps as u64)
                 .style(Style::default().fg(bar_color))
                 .value_style(Style::default().bg(bar_color).fg(Color::Black))
         );
@@ -267,11 +287,19 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
             .block(Block::default().borders(Borders::ALL).title(" RX Queue Load Distribution (PPS) "));
         f.render_widget(no_data, chunks[rx_chunk_idx]);
     } else {
-        let rx_title = Line::from(vec![
-            Span::raw(" RX Queue Load Distribution (PPS) "),
-            Span::styled("[Cyan: XDP/Zero-Copy | Green: SKB]", Style::default().fg(Color::Cyan)),
-            Span::raw(" "),
-        ]);
+        let rx_title = if app.filter_drv_only {
+            Line::from(vec![
+                Span::raw(" RX Queue Load "),
+                Span::styled("[FILTERED: DRV/AF_XDP ONLY]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                Span::raw(" "),
+            ])
+        } else {
+            Line::from(vec![
+                Span::raw(" RX Queue Load Distribution (PPS) "),
+                Span::styled("[Red: XDP/Zero-Copy | Green: SKB]", Style::default().fg(Color::Red)),
+                Span::raw(" "),
+            ])
+        };
 
         let rx_barchart = BarChart::default()
             .block(Block::default().title(rx_title).borders(Borders::ALL))
